@@ -37,11 +37,13 @@ wss.on("connection", (ws, req) => {
     ws.isAuthed = false;
 
 const ip = 
-  req.headers["x-forwarded-for"]?.split(",")[0] ||
-  req.socket.remoteAddress;
+  (req.headers["x-forwarded-for"} &&
+      req.headers["x-forwarded-for"].split(",")[0]) ||
+  req.socket.remoteAddress ||
+  "unknown";
 
   ws.ip = ip;
-  
+
   console.log("User connected IP:", ip);
   
     ws.on("message", async (data) => {
@@ -103,6 +105,8 @@ const ip =
                 });
 
                 await newMessage.save();
+
+            console.log("Saved message with IP:", newMessage.ip);
 
                 wss.clients.forEach(client => {
                     if (client.readyState === WebSocket.OPEN && client.isAuthed) {
