@@ -23,6 +23,7 @@ const messageSchema = new mongoose.Schema({
   username: String,
   message: String,
   channel: String,
+  ip: String,
   type: { type: String, default: "message" },
   createdAt: { type: Date, default: Date.now }
 });
@@ -30,11 +31,18 @@ const messageSchema = new mongoose.Schema({
 const Message = mongoose.model("Message", messageSchema);
 
 // ===== WebSocket =====
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
     console.log("User connected");
 
     ws.isAuthed = false;
 
+const ip = 
+  req.headers["x-forwarded-for"]?.split(",")[0] ||
+  req.socket.remoteAdress;
+
+  ws.ip = ip;
+  console.log("User connected IP:", ip);
+  
     ws.on("message", async (data) => {
         try {
             const parsed = JSON.parse(data);
@@ -89,7 +97,8 @@ wss.on("connection", (ws) => {
                 const newMessage = new Message({
                     username: parsed.username,
                     message: parsed.message,
-                    channel: parsed.channel
+                    channel: parsed.channel,
+                  ip: ws.ip
                 });
 
                 await newMessage.save();
