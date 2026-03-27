@@ -32,6 +32,27 @@ wss.on("connection", (ws) => {
 
     ws.on("message", async (data) => {
         try {
+          if (parsed.type === "auth") {
+    if (parsed.password === process.env.WS_PASSWORD) {
+        ws.isAuthed = true;
+
+        ws.send(JSON.stringify({
+            type: "auth_success"
+        }));
+    } else {
+        ws.send(JSON.stringify({
+            type: "auth_failed"
+        }));
+        ws.close();
+    }
+    return;
+}
+
+          if (!ws.isAuthed) {
+    ws.send(JSON.stringify({ type: "auth_failed" }));
+    ws.close();
+    return;
+}
             const parsed = JSON.parse(data);
 
             // =========================
