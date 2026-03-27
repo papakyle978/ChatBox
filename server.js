@@ -38,9 +38,10 @@ wss.on("connection", (ws, req) => {
 
 const ip = 
   req.headers["x-forwarded-for"]?.split(",")[0] ||
-  req.socket.remoteAdress;
+  req.socket.remoteAddress;
 
   ws.ip = ip;
+  
   console.log("User connected IP:", ip);
   
     ws.on("message", async (data) => {
