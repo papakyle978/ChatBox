@@ -20,9 +20,10 @@
   },
   "homepage": "https://github.com/GlthubUser1/ChatBox#readme",
   "dependencies": {
-    "bcryptjs": "^3.0.3",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
-    "express": "^5.2.1",
+    "dotenv": "^17.3.1",
+    "express": "^4.22.1",
     "mongoose": "^9.2.1",
     "ws": "^8.19.0"
   }
