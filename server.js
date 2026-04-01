@@ -17,10 +17,10 @@ const wss = new WebSocket.Server({ server });
 // ===== ENV =====
 const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH;
 
+if (!ADMIN_HASH) {
+  console.error("ADMIN_PASSWORD_HASH missing!");
+}
 // ===== MongoDB =====
-mongoose.connect(process.env.MONGO_URI)
-  .then(async () => {
-    console.log("MongoDB Connected");
 
     // 🔥 Reset all users offline on startup (prevents stuck users)
     await User.updateMany({}, { online: false });
@@ -46,6 +46,11 @@ const userSchema = new mongoose.Schema({
 
 const Message = mongoose.model("Message", messageSchema);
 const User = mongoose.model("User", userSchema);
+
+mongoose.connect(process.env.MONGO_URI)
+  .then(async () => {
+    console.log("MongoDB Connected");
+
 
 // ===== helper =====
 function safeMessage(m) {
@@ -168,19 +173,8 @@ wss.clients.forEach(client => {
   }
 });
 
-broadcastOnlineUsers();
-        
-        ws.send(JSON.stringify({ type: "auth_success" }));
-        return;
-      }
-
-      if (parsed.type === "auth") {
-  console.log("INPUT PASSWORD:", parsed.password);
-  console.log("HASH FROM ENV:", ADMIN_HASH);
-
+if (parsed.type === "auth") {
   const match = await bcrypt.compare(parsed.password, ADMIN_HASH);
-
-  console.log("MATCH RESULT:", match);
 
   if (!match) {
     ws.send(JSON.stringify({ type: "auth_failed" }));
@@ -188,10 +182,111 @@ broadcastOnlineUsers();
     return;
   }
 
+  const username = parsed.username?.trim();
+
+  if (!username) {
+    ws.send(JSON.stringify({ type: "invalid_username" }));
+    return;
+  }
+
+  let user = await User.findOne({ username });
+
+  if (!user) {
+    try {
+      user = new User({ username, online: true });
+      await user.save();
+    } catch {
+      ws.send(JSON.stringify({ type: "username_taken" }));
+      return;
+    }
+  } else {
+    if (user.online) {
+      ws.send(JSON.stringify({ type: "username_taken" }));
+      return;
+    }
+
+    user.online = true;
+    user.lastSeen = new Date();
+    await user.save();
+  }
+
+  ws.username = username;
+  ws.isAuthed = true;
+
   ws.send(JSON.stringify({ type: "auth_success" }));
+
+  // join message
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN && client.isAuthed) {
+      client.send(JSON.stringify({
+        type: "system",
+        message: `${username} joined the chat`,
+        channel: "general"
+      }));
+    }
+  });
+
+  broadcastOnlineUsers();
+  return;
+}
+if (parsed.type === "auth") {
+  const match = await bcrypt.compare(parsed.password, ADMIN_HASH);
+
+  if (!match) {
+    ws.send(JSON.stringify({ type: "auth_failed" }));
+    ws.close();
+    return;
+  }
+
+  const username = parsed.username?.trim();
+
+  if (!username) {
+    ws.send(JSON.stringify({ type: "invalid_username" }));
+    return;
+  }
+
+  let user = await User.findOne({ username });
+
+  if (!user) {
+    try {
+      user = new User({ username, online: true });
+      await user.save();
+    } catch {
+      ws.send(JSON.stringify({ type: "username_taken" }));
+      return;
+    }
+  } else {
+    if (user.online) {
+      ws.send(JSON.stringify({ type: "username_taken" }));
+      return;
+    }
+
+    user.online = true;
+    user.lastSeen = new Date();
+    await user.save();
+  }
+
+  ws.username = username;
+  ws.isAuthed = true;
+
+  ws.send(JSON.stringify({ type: "auth_success" }));
+
+  // join message
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN && client.isAuthed) {
+      client.send(JSON.stringify({
+        type: "system",
+        message: `${username} joined the chat`,
+        channel: "general"
+      }));
+    }
+  });
+
+  broadcastOnlineUsers();
   return;
 }
 
+      
       // ===== BLOCK IF NOT AUTHED =====
       if (!ws.isAuthed) {
         ws.send(JSON.stringify({ type: "auth_failed" }));
@@ -212,7 +307,9 @@ broadcastOnlineUsers();
         }));
       }
 
-      // ===== MESSAGE =====
+broadcastOnlineUsers();
+ 
+            // ===== MESSAGE =====
       if (parsed.type === "message") {
         const newMessage = new Message({
           username: ws.username,
