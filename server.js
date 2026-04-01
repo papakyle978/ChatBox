@@ -4,7 +4,6 @@ const WebSocket = require("ws");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
-
 require("dotenv").config();
 
 const app = express();
@@ -18,17 +17,10 @@ const wss = new WebSocket.Server({ server });
 const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH;
 
 if (!ADMIN_HASH) {
-  console.error("ADMIN_PASSWORD_HASH missing!");
+  console.error("❌ ADMIN_PASSWORD_HASH missing!");
 }
-// ===== MongoDB =====
 
-    // 🔥 Reset all users offline on startup (prevents stuck users)
-    await User.updateMany({}, { online: false });
-    console.log("All users set to offline");
-  })
-  .catch(err => console.error("MongoDB Connection Error:", err));
-
-// ===== Schemas =====
+// ===== MONGO MODELS =====
 const messageSchema = new mongoose.Schema({
   username: String,
   message: String,
@@ -47,12 +39,16 @@ const userSchema = new mongoose.Schema({
 const Message = mongoose.model("Message", messageSchema);
 const User = mongoose.model("User", userSchema);
 
+// ===== MONGO CONNECT =====
 mongoose.connect(process.env.MONGO_URI)
   .then(async () => {
     console.log("MongoDB Connected");
+    await User.updateMany({}, { online: false });
+    console.log("All users set offline");
+  })
+  .catch(err => console.error("MongoDB Error:", err));
 
-
-// ===== helper =====
+// ===== HELPERS =====
 function safeMessage(m) {
   return {
     id: m._id,
@@ -67,15 +63,15 @@ function safeMessage(m) {
 function broadcastOnlineUsers() {
   const users = [];
 
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client.isAuthed && client.username) {
-      users.push(client.username);
+  wss.clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN && c.isAuthed && c.username) {
+      users.push(c.username);
     }
   });
 
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client.isAuthed) {
-      client.send(JSON.stringify({
+  wss.clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN && c.isAuthed) {
+      c.send(JSON.stringify({
         type: "online_users",
         users
       }));
@@ -83,35 +79,24 @@ function broadcastOnlineUsers() {
   });
 }
 
-// ===== LOGIN ROUTE =====
+// ===== LOGIN ROUTE (optional REST auth) =====
 app.post("/login", async (req, res) => {
   try {
-    const password = req.body.password;
-
-    if (!password) return res.status(400).send("Missing password");
-
-    const match = await bcrypt.compare(password, ADMIN_HASH);
-
-    if (match) {
-      res.send("ok");
-    } else {
-      res.status(401).send("nope");
-    }
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("server error");
+    const match = await bcrypt.compare(req.body.password, ADMIN_HASH);
+    if (match) return res.send("ok");
+    res.status(401).send("nope");
+  } catch {
+    res.status(500).send("error");
   }
 });
 
-// ===== WebSocket =====
+// ===== WEBSOCKET =====
 wss.on("connection", (ws, req) => {
-  console.log("User connected");
-
   ws.isAuthed = false;
   ws.username = null;
 
   const ip =
-    (req.headers["x-forwarded-for"]?.split(",")[0]) ||
+    req.headers["x-forwarded-for"]?.split(",")[0] ||
     req.socket.remoteAddress ||
     "unknown";
 
@@ -121,7 +106,7 @@ wss.on("connection", (ws, req) => {
     try {
       const parsed = JSON.parse(data);
 
-      // ===== AUTH =====
+      // ================= AUTH =================
       if (parsed.type === "auth") {
         const match = await bcrypt.compare(parsed.password, ADMIN_HASH);
 
@@ -132,7 +117,6 @@ wss.on("connection", (ws, req) => {
         }
 
         const username = parsed.username?.trim();
-
         if (!username) {
           ws.send(JSON.stringify({ type: "invalid_username" }));
           return;
@@ -140,161 +124,48 @@ wss.on("connection", (ws, req) => {
 
         let user = await User.findOne({ username });
 
-        if (!user) {
-          try {
-            user = new User({ username, online: true });
-            await user.save();
-          } catch (err) {
-            ws.send(JSON.stringify({ type: "username_taken" }));
-            return;
-          }
-        } else {
-          if (user.online) {
-            ws.send(JSON.stringify({ type: "username_taken" }));
-            return;
-          }
+        if (user && user.online) {
+          ws.send(JSON.stringify({ type: "username_taken" }));
+          return;
+        }
 
+        if (!user) {
+          user = new User({ username, online: true });
+        } else {
           user.online = true;
           user.lastSeen = new Date();
-          await user.save();
         }
+
+        await user.save();
 
         ws.username = username;
         ws.isAuthed = true;
 
-// 🔥 system join message
-wss.clients.forEach(client => {
-  if (client.readyState === WebSocket.OPEN && client.isAuthed) {
-    client.send(JSON.stringify({
-      type: "system",
-      message: `${username} joined the chat`,
-      channel: "general"
-    }));
-  }
-});
+        ws.send(JSON.stringify({ type: "auth_success" }));
 
-if (parsed.type === "auth") {
-  const match = await bcrypt.compare(parsed.password, ADMIN_HASH);
+        // system join message
+        wss.clients.forEach(c => {
+          if (c.readyState === WebSocket.OPEN && c.isAuthed) {
+            c.send(JSON.stringify({
+              type: "system",
+              message: `${username} joined the chat`,
+              channel: "general"
+            }));
+          }
+        });
 
-  if (!match) {
-    ws.send(JSON.stringify({ type: "auth_failed" }));
-    ws.close();
-    return;
-  }
+        broadcastOnlineUsers();
+        return;
+      }
 
-  const username = parsed.username?.trim();
-
-  if (!username) {
-    ws.send(JSON.stringify({ type: "invalid_username" }));
-    return;
-  }
-
-  let user = await User.findOne({ username });
-
-  if (!user) {
-    try {
-      user = new User({ username, online: true });
-      await user.save();
-    } catch {
-      ws.send(JSON.stringify({ type: "username_taken" }));
-      return;
-    }
-  } else {
-    if (user.online) {
-      ws.send(JSON.stringify({ type: "username_taken" }));
-      return;
-    }
-
-    user.online = true;
-    user.lastSeen = new Date();
-    await user.save();
-  }
-
-  ws.username = username;
-  ws.isAuthed = true;
-
-  ws.send(JSON.stringify({ type: "auth_success" }));
-
-  // join message
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client.isAuthed) {
-      client.send(JSON.stringify({
-        type: "system",
-        message: `${username} joined the chat`,
-        channel: "general"
-      }));
-    }
-  });
-
-  broadcastOnlineUsers();
-  return;
-}
-if (parsed.type === "auth") {
-  const match = await bcrypt.compare(parsed.password, ADMIN_HASH);
-
-  if (!match) {
-    ws.send(JSON.stringify({ type: "auth_failed" }));
-    ws.close();
-    return;
-  }
-
-  const username = parsed.username?.trim();
-
-  if (!username) {
-    ws.send(JSON.stringify({ type: "invalid_username" }));
-    return;
-  }
-
-  let user = await User.findOne({ username });
-
-  if (!user) {
-    try {
-      user = new User({ username, online: true });
-      await user.save();
-    } catch {
-      ws.send(JSON.stringify({ type: "username_taken" }));
-      return;
-    }
-  } else {
-    if (user.online) {
-      ws.send(JSON.stringify({ type: "username_taken" }));
-      return;
-    }
-
-    user.online = true;
-    user.lastSeen = new Date();
-    await user.save();
-  }
-
-  ws.username = username;
-  ws.isAuthed = true;
-
-  ws.send(JSON.stringify({ type: "auth_success" }));
-
-  // join message
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client.isAuthed) {
-      client.send(JSON.stringify({
-        type: "system",
-        message: `${username} joined the chat`,
-        channel: "general"
-      }));
-    }
-  });
-
-  broadcastOnlineUsers();
-  return;
-}
-
-      
-      // ===== BLOCK IF NOT AUTHED =====
+      // ================= BLOCK UNAUTH =================
       if (!ws.isAuthed) {
         ws.send(JSON.stringify({ type: "auth_failed" }));
         ws.close();
         return;
       }
 
-      // ===== HISTORY =====
+      // ================= HISTORY =================
       if (parsed.type === "get_history") {
         const messages = await Message.find({ channel: parsed.channel })
           .sort({ createdAt: 1 })
@@ -305,32 +176,33 @@ if (parsed.type === "auth") {
           channel: parsed.channel,
           messages: messages.map(safeMessage)
         }));
+        return;
       }
 
-broadcastOnlineUsers();
- 
-            // ===== MESSAGE =====
+      // ================= MESSAGE =================
       if (parsed.type === "message") {
-        const newMessage = new Message({
+        const msg = new Message({
           username: ws.username,
           message: parsed.message,
           channel: parsed.channel,
           ip: ws.ip
         });
 
-        await newMessage.save();
+        await msg.save();
 
-        wss.clients.forEach(client => {
-          if (client.readyState === WebSocket.OPEN && client.isAuthed) {
-            client.send(JSON.stringify({
+        wss.clients.forEach(c => {
+          if (c.readyState === WebSocket.OPEN && c.isAuthed) {
+            c.send(JSON.stringify({
               type: "message",
-              ...safeMessage(newMessage)
+              ...safeMessage(msg)
             }));
           }
         });
+
+        return;
       }
 
-      // ===== USERNAME CHANGE =====
+      // ================= USERNAME CHANGE =================
       if (parsed.type === "username_change") {
         const newName = parsed.username?.trim();
 
@@ -346,7 +218,6 @@ broadcastOnlineUsers();
           return;
         }
 
-        // set old offline
         await User.updateOne(
           { username: ws.username },
           { online: false }
@@ -356,11 +227,11 @@ broadcastOnlineUsers();
 
         if (!user) {
           user = new User({ username: newName, online: true });
-          await user.save();
         } else {
           user.online = true;
-          await user.save();
         }
+
+        await user.save();
 
         ws.username = newName;
 
@@ -368,43 +239,46 @@ broadcastOnlineUsers();
           type: "username_changed",
           username: newName
         }));
+
+        broadcastOnlineUsers();
+        return;
       }
 
     } catch (err) {
-      console.error("WebSocket error:", err);
+      console.error("WS Error:", err);
     }
   });
 
-  // ===== DISCONNECT =====
+  // ================= DISCONNECT =================
   ws.on("close", async () => {
-  if (ws.username) {
-    await User.updateOne(
-      { username: ws.username },
-      { online: false, lastSeen: new Date() }
-    );
+    if (ws.username) {
+      await User.updateOne(
+        { username: ws.username },
+        { online: false, lastSeen: new Date() }
+      );
 
-    // 🔥 leave message
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN && client.isAuthed) {
-        client.send(JSON.stringify({
-          type: "system",
-          message: `${ws.username} left the chat`,
-          channel: "general"
-        }));
-      }
-    });
+      wss.clients.forEach(c => {
+        if (c.readyState === WebSocket.OPEN && c.isAuthed) {
+          c.send(JSON.stringify({
+            type: "system",
+            message: `${ws.username} left the chat`,
+            channel: "general"
+          }));
+        }
+      });
 
-    broadcastOnlineUsers();
-
-    console.log(`User disconnected: ${ws.username}`);
-  }
+      broadcastOnlineUsers();
+    }
+  });
 });
 
-// ===== ROUTE =====
+// ===== ROUTES =====
 app.get("/", (req, res) => {
   res.send("WebSocket Chat Server Running");
 });
 
 // ===== START =====
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
