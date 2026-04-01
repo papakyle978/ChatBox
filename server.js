@@ -13,14 +13,14 @@ app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// ===== ENV =====
+// ================= ENV =================
 const ADMIN_HASH = process.env.ADMIN_PASSWORD_HASH;
 
 if (!ADMIN_HASH) {
   console.error("❌ ADMIN_PASSWORD_HASH missing!");
 }
 
-// ===== MONGO MODELS =====
+// ================= MODELS =================
 const messageSchema = new mongoose.Schema({
   username: String,
   message: String,
@@ -39,16 +39,15 @@ const userSchema = new mongoose.Schema({
 const Message = mongoose.model("Message", messageSchema);
 const User = mongoose.model("User", userSchema);
 
-// ===== MONGO CONNECT =====
+// ================= MONGO =================
 mongoose.connect(process.env.MONGO_URI)
   .then(async () => {
     console.log("MongoDB Connected");
     await User.updateMany({}, { online: false });
-    console.log("All users set offline");
   })
-  .catch(err => console.error("MongoDB Error:", err));
+  .catch(err => console.error(err));
 
-// ===== HELPERS =====
+// ================= HELPERS =================
 function safeMessage(m) {
   return {
     id: m._id,
@@ -64,13 +63,13 @@ function broadcastOnlineUsers() {
   const users = [];
 
   wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN && c.isAuthed && c.username) {
+    if (c.readyState === WebSocket.OPEN && c.username) {
       users.push(c.username);
     }
   });
 
   wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN && c.isAuthed) {
+    if (c.readyState === WebSocket.OPEN) {
       c.send(JSON.stringify({
         type: "online_users",
         users
@@ -79,7 +78,19 @@ function broadcastOnlineUsers() {
   });
 }
 
-// ===== LOGIN ROUTE (optional REST auth) =====
+function broadcastSystem(message, channel = "general") {
+  wss.clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN) {
+      c.send(JSON.stringify({
+        type: "system",
+        message,
+        channel
+      }));
+    }
+  });
+}
+
+// ================= LOGIN ROUTE =================
 app.post("/login", async (req, res) => {
   try {
     const match = await bcrypt.compare(req.body.password, ADMIN_HASH);
@@ -90,10 +101,10 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ===== WEBSOCKET =====
+// ================= WS =================
 wss.on("connection", (ws, req) => {
-  ws.isAuthed = false;
   ws.username = null;
+  ws.isAuthed = false;
 
   const ip =
     req.headers["x-forwarded-for"]?.split(",")[0] ||
@@ -102,184 +113,153 @@ wss.on("connection", (ws, req) => {
 
   ws.ip = ip;
 
-  ws.on("message", async (data) => {
+  ws.on("message", async (raw) => {
+    let data;
     try {
-      const parsed = JSON.parse(data);
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
 
-      // ================= AUTH =================
-      if (parsed.type === "auth") {
-        const match = await bcrypt.compare(parsed.password, ADMIN_HASH);
+    // ================= AUTH =================
+    if (data.type === "auth") {
+      const ok = await bcrypt.compare(data.password, ADMIN_HASH);
 
-        if (!match) {
-          ws.send(JSON.stringify({ type: "auth_failed" }));
-          ws.close();
-          return;
-        }
-
-        const username = parsed.username?.trim();
-        if (!username) {
-          ws.send(JSON.stringify({ type: "invalid_username" }));
-          return;
-        }
-
-        let user = await User.findOne({ username });
-
-        if (user && user.online) {
-          ws.send(JSON.stringify({ type: "username_taken" }));
-          return;
-        }
-
-        if (!user) {
-          user = new User({ username, online: true });
-        } else {
-          user.online = true;
-          user.lastSeen = new Date();
-        }
-
-        await user.save();
-
-        ws.username = username;
-        ws.isAuthed = true;
-
-        ws.send(JSON.stringify({ type: "auth_success" }));
-
-        // system join message
-        wss.clients.forEach(c => {
-          if (c.readyState === WebSocket.OPEN && c.isAuthed) {
-            c.send(JSON.stringify({
-              type: "system",
-              message: `${username} joined the chat`,
-              channel: "general"
-            }));
-          }
-        });
-
-        broadcastOnlineUsers();
-        return;
-      }
-
-      // ================= BLOCK UNAUTH =================
-      if (!ws.isAuthed) {
+      if (!ok) {
         ws.send(JSON.stringify({ type: "auth_failed" }));
         ws.close();
         return;
       }
 
-      // ================= HISTORY =================
-      if (parsed.type === "get_history") {
-        const messages = await Message.find({ channel: parsed.channel })
-          .sort({ createdAt: 1 })
-          .limit(50);
+      const username = (data.username || "").trim();
+      if (!username) return;
 
-        ws.send(JSON.stringify({
-          type: "history",
-          channel: parsed.channel,
-          messages: messages.map(safeMessage)
-        }));
+      ws.username = username;
+      ws.isAuthed = true;
+
+      await User.updateOne(
+        { username },
+        { username, online: true, lastSeen: new Date() },
+        { upsert: true }
+      );
+
+      ws.send(JSON.stringify({ type: "auth_success" }));
+
+      broadcastSystem(`${username} joined the chat`, "general");
+      broadcastOnlineUsers();
+      return;
+    }
+
+    // ================= BLOCK UNAUTH =================
+    if (!ws.isAuthed) {
+      ws.send(JSON.stringify({ type: "auth_failed" }));
+      ws.close();
+      return;
+    }
+
+    // ================= HISTORY =================
+    if (data.type === "get_history") {
+      const channel = data.channel || "general";
+
+      const messages = await Message.find({ channel })
+        .sort({ createdAt: 1 })
+        .limit(100);
+
+      ws.send(JSON.stringify({
+        type: "history",
+        channel,
+        messages: messages.map(safeMessage)
+      }));
+
+      return;
+    }
+
+    // ================= MESSAGE =================
+    if (data.type === "message") {
+      const channel = data.channel || "general";
+
+      const msg = await Message.create({
+        username: ws.username,
+        message: data.message,
+        channel,
+        ip: ws.ip
+      });
+
+      const payload = safeMessage(msg);
+
+      wss.clients.forEach(c => {
+        if (c.readyState === WebSocket.OPEN && c.isAuthed) {
+          c.send(JSON.stringify({
+            type: "message",
+            ...payload
+          }));
+        }
+      });
+
+      return;
+    }
+
+    // ================= USERNAME CHANGE =================
+    if (data.type === "username_change") {
+      const oldName = ws.username;
+      const newName = (data.newName || "").trim();
+
+      if (!newName || newName === oldName) return;
+
+      const exists = await User.findOne({ username: newName });
+
+      if (exists && exists.online) {
+        ws.send(JSON.stringify({ type: "username_taken" }));
         return;
       }
 
-      // ================= MESSAGE =================
-      if (parsed.type === "message") {
-        const msg = new Message({
-          username: ws.username,
-          message: parsed.message,
-          channel: parsed.channel,
-          ip: ws.ip
-        });
+      await User.updateOne(
+        { username: oldName },
+        { online: false }
+      );
 
-        await msg.save();
+      ws.username = newName;
 
-        wss.clients.forEach(c => {
-          if (c.readyState === WebSocket.OPEN && c.isAuthed) {
-            c.send(JSON.stringify({
-              type: "message",
-              ...safeMessage(msg)
-            }));
-          }
-        });
+      await User.updateOne(
+        { username: newName },
+        { username: newName, online: true, lastSeen: new Date() },
+        { upsert: true }
+      );
 
-        return;
-      }
+      ws.send(JSON.stringify({
+        type: "username_changed",
+        oldName,
+        newName
+      }));
 
-      // ================= USERNAME CHANGE =================
-      if (parsed.type === "username_change") {
-        const newName = parsed.username?.trim();
+      broadcastSystem(`${oldName} is now ${newName}`, "general");
+      broadcastOnlineUsers();
 
-        if (!newName) {
-          ws.send(JSON.stringify({ type: "invalid_username" }));
-          return;
-        }
-
-        const existing = await User.findOne({ username: newName });
-
-        if (existing && existing.online) {
-          ws.send(JSON.stringify({ type: "username_taken" }));
-          return;
-        }
-
-        await User.updateOne(
-          { username: ws.username },
-          { online: false }
-        );
-
-        let user = await User.findOne({ username: newName });
-
-        if (!user) {
-          user = new User({ username: newName, online: true });
-        } else {
-          user.online = true;
-        }
-
-        await user.save();
-
-        ws.username = newName;
-        ws.isAuthed = true;
-
-        ws.send(JSON.stringify({
-          type: "username_changed",
-          username: newName
-        }));
-
-        broadcastOnlineUsers();
-        return;
-      }
-
-    } catch (err) {
-      console.error("WS Error:", err);
+      return;
     }
   });
 
   // ================= DISCONNECT =================
   ws.on("close", async () => {
-    if (ws.username) {
-      await User.updateOne(
-        { username: ws.username },
-        { online: false, lastSeen: new Date() }
-      );
+    if (!ws.username) return;
 
-      wss.clients.forEach(c => {
-        if (c.readyState === WebSocket.OPEN && c.isAuthed) {
-          c.send(JSON.stringify({
-            type: "system",
-            message: `${ws.username} left the chat`,
-            channel: "general"
-          }));
-        }
-      });
+    await User.updateOne(
+      { username: ws.username },
+      { online: false, lastSeen: new Date() }
+    );
 
-      broadcastOnlineUsers();
-    }
+    broadcastSystem(`${ws.username} left the chat`, "general");
+    broadcastOnlineUsers();
   });
 });
 
-// ===== ROUTES =====
+// ================= ROUTE =================
 app.get("/", (req, res) => {
-  res.send("WebSocket Chat Server Running");
+  res.send("Chat Server Running");
 });
 
-// ===== START =====
+// ================= START =================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Server running on port", PORT);
 });
