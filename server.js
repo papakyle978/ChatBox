@@ -234,6 +234,7 @@ wss.on("connection", (ws, req) => {
         await user.save();
 
         ws.username = newName;
+        ws.isAuthed = true;
 
         ws.send(JSON.stringify({
           type: "username_changed",
