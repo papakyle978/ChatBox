@@ -142,6 +142,24 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
+      if (parsed.type === "auth") {
+  console.log("INPUT PASSWORD:", parsed.password);
+  console.log("HASH FROM ENV:", ADMIN_HASH);
+
+  const match = await bcrypt.compare(parsed.password, ADMIN_HASH);
+
+  console.log("MATCH RESULT:", match);
+
+  if (!match) {
+    ws.send(JSON.stringify({ type: "auth_failed" }));
+    ws.close();
+    return;
+  }
+
+  ws.send(JSON.stringify({ type: "auth_success" }));
+  return;
+}
+
       // ===== BLOCK IF NOT AUTHED =====
       if (!ws.isAuthed) {
         ws.send(JSON.stringify({ type: "auth_failed" }));
