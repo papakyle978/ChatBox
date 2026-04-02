@@ -202,7 +202,7 @@ wss.on("connection", (ws, req) => {
     // ================= USERNAME CHANGE =================
     if (data.type === "username_change") {
       const oldName = ws.username;
-      const newName = (data.newName || "").trim();
+      const newName = (data.username || data.newName || "").trim();
 
       if (!newName || newName === oldName) return;
 
