@@ -244,6 +244,27 @@ wss.on("connection", (ws, req) => {
     }
   });
 
+
+if (data.type === "dm_request") {
+  const target = data.to;
+
+  wss.clients.forEach(c => {
+    if (
+      c.readyState === WebSocket.OPEN &&
+      c.isAuthed &&
+      c.username === target
+    ) {
+      c.send(JSON.stringify({
+        type: "dm_request",
+        from: ws.username,
+        channel: getDMChannel(ws.username, target)
+      }));
+    }
+  });
+
+  return;
+}
+  
   // ===== DISCONNECT =====
   ws.on("close", async () => {
     if (!ws.username) return;
