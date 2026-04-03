@@ -33,7 +33,7 @@ const User = mongoose.model("User", new mongoose.Schema({
   lastSeen: { type: Date, default: Date.now }
 }));
 
-// ===== CONNECT DB =====
+// ===== CONNECT =====
 mongoose.connect(process.env.MONGO_URI)
   .then(async () => {
     console.log("MongoDB Connected");
@@ -65,37 +65,16 @@ function broadcastSystem(message, channel = "general1") {
   broadcast("system", { message, channel });
 }
 
-// ===== ONLINE USERS (FIXED UNIQUE) =====
 function broadcastOnline() {
-  const users = [...new Set(
-    [...wss.clients]
-      .filter(c => c.readyState === WebSocket.OPEN && c.isAuthed && c.username)
-      .map(c => c.username)
-  )];
+  const users = [];
 
-  broadcast("online_users", { users });
-}
-
-// ===== DM NOTIFICATION SYSTEM =====
-function sendDMRequest(sender, channel) {
-  const parts = channel.split(":");
-  const targetUser = parts.find(u => u !== sender);
-
-  if (!targetUser) return;
-
-  wss.clients.forEach(client => {
-    if (
-      client.readyState === WebSocket.OPEN &&
-      client.isAuthed &&
-      client.username === targetUser
-    ) {
-      client.send(JSON.stringify({
-        type: "dm_request",
-        from: sender,
-        channel
-      }));
+  wss.clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN && c.isAuthed && c.username) {
+      users.push(c.username);
     }
   });
+
+  broadcast("online_users", { users });
 }
 
 // ===== WS =====
@@ -145,9 +124,11 @@ wss.on("connection", (ws, req) => {
       } catch (err) {
         console.error("Auth error:", err);
       }
+
       return;
     }
 
+    // 🚫 don't kill connection, just ignore until authed
     if (!ws.isAuthed) return;
 
     // ===== HISTORY =====
@@ -171,24 +152,18 @@ wss.on("connection", (ws, req) => {
     if (data.type === "message") {
       const channel = data.channel || "general1";
 
-      // 🔔 DM notification trigger
-      if (channel.startsWith("dm:")) {
-        sendDMRequest(ws.username, channel);
-      }
-
       const msg = await Message.create({
         username: ws.username,
         message: data.message,
         channel,
-        ip: ws.ip,
-        type: "message"
+        ip: ws.ip
       });
 
       broadcast("message", safeMessage(msg));
       return;
     }
 
-    // ===== USERNAME CHANGE (FIXED EVENT CONSISTENCY) =====
+    // ===== USERNAME CHANGE =====
     if (data.type === "username_change") {
       const oldName = ws.username;
       const newName = (data.newName || "").trim();
@@ -196,14 +171,15 @@ wss.on("connection", (ws, req) => {
       if (!newName || newName === oldName) return;
 
       const exists = await User.findOne({ username: newName });
-
-      if (exists && exists.online && newName !== oldName) {
+      if (exists && exists.online) {
         ws.send(JSON.stringify({ type: "username_taken" }));
         return;
       }
 
+      // mark old offline
       await User.updateOne({ username: oldName }, { online: false });
 
+      // mark new online
       await User.updateOne(
         { username: newName },
         { username: newName, online: true, lastSeen: new Date() },
@@ -212,14 +188,36 @@ wss.on("connection", (ws, req) => {
 
       ws.username = newName;
 
+      // ✅ ONLY ONE RESPONSE (no duplicate spam)
       ws.send(JSON.stringify({
         type: "username_changed",
         oldName,
         newName
       }));
 
+      // ✅ ONLY ONE BROADCAST
       broadcastSystem(`${oldName} is now ${newName}`);
       broadcastOnline();
+
+      return;
+    }
+
+    // ===== DM REQUEST (NEW FEATURE READY) =====
+    if (data.type === "dm_request") {
+      const target = data.to;
+
+      wss.clients.forEach(c => {
+        if (
+          c.readyState === WebSocket.OPEN &&
+          c.isAuthed &&
+          c.username === target
+        ) {
+          c.send(JSON.stringify({
+            type: "dm_request",
+            from: ws.username
+          }));
+        }
+      });
 
       return;
     }
