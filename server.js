@@ -33,7 +33,7 @@ const User = mongoose.model("User", new mongoose.Schema({
   lastSeen: { type: Date, default: Date.now }
 }));
 
-// ===== CONNECT =====
+// ===== CONNECT DB =====
 mongoose.connect(process.env.MONGO_URI)
   .then(async () => {
     console.log("MongoDB Connected");
@@ -65,16 +65,37 @@ function broadcastSystem(message, channel = "general1") {
   broadcast("system", { message, channel });
 }
 
+// ===== ONLINE USERS (FIXED UNIQUE) =====
 function broadcastOnline() {
-  const users = [];
-
-  wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN && c.isAuthed && c.username) {
-      users.push(c.username);
-    }
-  });
+  const users = [...new Set(
+    [...wss.clients]
+      .filter(c => c.readyState === WebSocket.OPEN && c.isAuthed && c.username)
+      .map(c => c.username)
+  )];
 
   broadcast("online_users", { users });
+}
+
+// ===== DM NOTIFICATION SYSTEM =====
+function sendDMRequest(sender, channel) {
+  const parts = channel.split(":");
+  const targetUser = parts.find(u => u !== sender);
+
+  if (!targetUser) return;
+
+  wss.clients.forEach(client => {
+    if (
+      client.readyState === WebSocket.OPEN &&
+      client.isAuthed &&
+      client.username === targetUser
+    ) {
+      client.send(JSON.stringify({
+        type: "dm_request",
+        from: sender,
+        channel
+      }));
+    }
+  });
 }
 
 // ===== WS =====
@@ -124,11 +145,9 @@ wss.on("connection", (ws, req) => {
       } catch (err) {
         console.error("Auth error:", err);
       }
-
       return;
     }
 
-    // 🚫 DO NOT KILL CONNECTION IF NOT AUTHED
     if (!ws.isAuthed) return;
 
     // ===== HISTORY =====
@@ -152,18 +171,24 @@ wss.on("connection", (ws, req) => {
     if (data.type === "message") {
       const channel = data.channel || "general1";
 
+      // 🔔 DM notification trigger
+      if (channel.startsWith("dm:")) {
+        sendDMRequest(ws.username, channel);
+      }
+
       const msg = await Message.create({
         username: ws.username,
         message: data.message,
         channel,
-        ip: ws.ip
+        ip: ws.ip,
+        type: "message"
       });
 
       broadcast("message", safeMessage(msg));
       return;
     }
 
-    // ===== USERNAME CHANGE =====
+    // ===== USERNAME CHANGE (FIXED EVENT CONSISTENCY) =====
     if (data.type === "username_change") {
       const oldName = ws.username;
       const newName = (data.newName || "").trim();
@@ -171,15 +196,14 @@ wss.on("connection", (ws, req) => {
       if (!newName || newName === oldName) return;
 
       const exists = await User.findOne({ username: newName });
-      if (exists && exists.online) {
+
+      if (exists && exists.online && newName !== oldName) {
         ws.send(JSON.stringify({ type: "username_taken" }));
         return;
       }
 
-      // set old offline
       await User.updateOne({ username: oldName }, { online: false });
 
-      // set new online
       await User.updateOne(
         { username: newName },
         { username: newName, online: true, lastSeen: new Date() },
