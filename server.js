@@ -22,45 +22,6 @@ const User = mongoose.model("User", UserSchema);
 mongoose .connect(process.env.MONGO_URI) .then(async () => { console.log("MongoDB Connected"); await User.updateMany({}, { online: false }); }) .catch(err => console.error("MongoDB connection error:", err));
 
 // ===== HELPERS =====
-
-function filterMessage(text, { mode = "block" } = {}) {
-  if (!text) return null;
-
-  const badWords = [
-    "asshole",
-    "nigga",
-    "shit",
-    "fuck",
-    "bitch",
-    "nigger",
-    "bastard"
-  ];
-
-  const original = String(text);
-  const lower = original.toLowerCase();
-
-  // safer word-boundary detection (prevents "class" → "ass" false match)
-  const hasBadWord = badWords.some(word => {
-    const regex = new RegExp(`\\b${word}\\b`, "i");
-    return regex.test(lower);
-  });
-
-  if (hasBadWord) {
-    if (mode === "block") return null;
-
-    // censor mode
-    let cleaned = original;
-    badWords.forEach(word => {
-      const regex = new RegExp(`\\b${word}\\b`, "gi");
-      cleaned = cleaned.replace(regex, "****");
-    });
-
-    return cleaned;
-  }
-
-  return original;
-}
-
 function getDMChannel(a, b) { return "dm:" + [a, b].sort().join(":"); }
 
 function safeMessage(m) { return { id: String(m._id), username: m.username, message: m.message, channel: m.channel, type: m.type, createdAt: m.createdAt }; }
@@ -164,33 +125,22 @@ try {
   }
 
   // ===== MESSAGE =====
-if (data.type === "message") {
-  const channel = normalizeChannel(data.channel);
-  const text = normalizeMessage(data.message);
+  if (data.type === "message") {
+    const channel = normalizeChannel(data.channel);
+    const text = normalizeMessage(data.message);
 
-  if (!text || text.length > 500) return;
+    if (!text || text.length > 500) return;
 
-  const filtered = filterMessage(text, { mode: "block" });
-
-  if (!filtered) {
-    sendToClient(ws, {
-      type: "system",
-      message: "⚠️ Your message contains blocked language.",
-      channel
+    const msg = await Message.create({
+      username: ws.username,
+      message: text,
+      channel,
+      ip: ws.ip
     });
+
+    broadcast("message", safeMessage(msg));
     return;
   }
-
-  const msg = await Message.create({
-    username: ws.username,
-    message: filtered,
-    channel,
-    ip: ws.ip
-  });
-
-  broadcast("message", safeMessage(msg));
-  return;
-}
 
   // ===== USERNAME CHANGE =====
   if (data.type === "username_change") {
