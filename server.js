@@ -23,30 +23,42 @@ mongoose .connect(process.env.MONGO_URI) .then(async () => { console.log("MongoD
 
 // ===== HELPERS =====
 
-const badWords = [
-  "asshole",
-  "nigga",
-  "shit",
-  "fuck",
-  "bitch",
-  "nigger",
-  "bastard"
-];
+function filterMessage(text, { mode = "block" } = {}) {
+  if (!text) return null;
 
-function containsProfanity(text) {
-  const lower = text.toLowerCase();
-  return badWords.some(word => lower.includes(word));
-}
+  const badWords = [
+    "asshole",
+    "nigga",
+    "shit",
+    "fuck",
+    "bitch",
+    "nigger",
+    "bastard"
+  ];
 
-function cleanMessage(text) {
-  let cleaned = text;
+  const original = String(text);
+  const lower = original.toLowerCase();
 
-  badWords.forEach(word => {
-    const regex = new RegExp(`\\b${word}\\b`, "gi");
-    cleaned = cleaned.replace(regex, "****");
+  // safer word-boundary detection (prevents "class" → "ass" false match)
+  const hasBadWord = badWords.some(word => {
+    const regex = new RegExp(`\\b${word}\\b`, "i");
+    return regex.test(lower);
   });
 
-  return cleaned;
+  if (hasBadWord) {
+    if (mode === "block") return null;
+
+    // censor mode
+    let cleaned = original;
+    badWords.forEach(word => {
+      const regex = new RegExp(`\\b${word}\\b`, "gi");
+      cleaned = cleaned.replace(regex, "****");
+    });
+
+    return cleaned;
+  }
+
+  return original;
 }
 
 function getDMChannel(a, b) { return "dm:" + [a, b].sort().join(":"); }
@@ -158,8 +170,9 @@ if (data.type === "message") {
 
   if (!text || text.length > 500) return;
 
-  // ===== PROFANITY CHECK =====
-  if (containsProfanity(text)) {
+  const filtered = filterMessage(text, { mode: "block" });
+
+  if (!filtered) {
     sendToClient(ws, {
       type: "system",
       message: "⚠️ Your message contains blocked language.",
@@ -170,7 +183,7 @@ if (data.type === "message") {
 
   const msg = await Message.create({
     username: ws.username,
-    message: cleanMessage(text), // optional censoring instead of raw text
+    message: filtered,
     channel,
     ip: ws.ip
   });
