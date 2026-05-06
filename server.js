@@ -66,7 +66,7 @@ try {
       return;
     }
 
-    const password = String(data.ws_password || "");
+    const password = String(data.password || "");
     const username = normalizeUsername(data.username);
 
     if (!username) {
